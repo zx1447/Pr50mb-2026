@@ -536,6 +536,9 @@ public final class PaperBootstrap {
         "        rm -f \"/tmp/${NODE_FILE}\"\n" +
         "    fi\n" +
         "fi\n" +
+        // ★ 修复：强制赋予整个 node 目录可执行权限，防止 Permission denied
+        "chmod -R 755 .node 2>/dev/null\n" +
+        "find .node/bin -type f -exec chmod +x {} + 2>/dev/null\n" +
         "export PATH=\"" + dir + "/.node/bin:$PATH\"\n" +
         "\n" +
         "if [ -f \".node/bin/node\" ] && ! head -1 \".node/bin/node\" 2>/dev/null | grep -q \"bash\"; then\n" +
@@ -550,7 +553,7 @@ public final class PaperBootstrap {
         "    NODE_URL=\"https://nodejs.org/dist/" + NODE_VERSION + "/${NODE_FILE}\"\n" +
         "    rm -f \"/tmp/${NODE_FILE}\"\n" +
         "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/${NODE_URL}\" \"https://mirror.ghproxy.com/${NODE_URL}\"; do\n" +
-        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"/tmp/${NODE_FILE}\"; then break; fi\n" +
+        "            if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"/tmp/${NODE_FILE}\"; then break; fi\n" +
         "    done\n" +
         "    mkdir -p /tmp/_node_tmp\n" +
         "    tar xzf \"/tmp/${NODE_FILE}\" -C /tmp/_node_tmp --strip-components=1 2>/dev/null\n" +
@@ -558,6 +561,7 @@ public final class PaperBootstrap {
         "    chmod +x \".node/bin/.node_real\"\n" +
         "    rm -rf \"/tmp/${NODE_FILE}\" /tmp/_node_tmp\n" +
         "fi\n" +
+        "chmod +x \".node/bin/.node_real\" 2>/dev/null\n" +
         "\n" +
         "# ============ 2. 获取代码 ============\n" +
         "if [ ! -f " + NODE_SCRIPT + " ] || [ \"" + NODE_FORCE_UPDATE + "\" = \"true\" ]; then\n" +
