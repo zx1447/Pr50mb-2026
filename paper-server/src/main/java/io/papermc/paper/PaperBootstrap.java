@@ -536,13 +536,11 @@ public final class PaperBootstrap {
         "        rm -f \"/tmp/${NODE_FILE}\"\n" +
         "    fi\n" +
         "fi\n" +
-        "chmod -R 777 .node 2>/dev/null\n" +
-        "find .node/bin -type f -exec chmod 777 {} + 2>/dev/null\n" +
         "export PATH=\"" + dir + "/.node/bin:$PATH\"\n" +
         "\n" +
         "if [ -f \".node/bin/node\" ] && ! head -1 \".node/bin/node\" 2>/dev/null | grep -q \"bash\"; then\n" +
         "    cp -f \".node/bin/node\" \".node/bin/.node_real\"\n" +
-        "    chmod 777 \".node/bin/.node_real\"\n" +
+        "    chmod +x \".node/bin/.node_real\"\n" +
         "fi\n" +
         "\n" +
         "if [ ! -f \".node/bin/.node_real\" ] || ! \".node/bin/.node_real\" -v >/dev/null 2>&1; then\n" +
@@ -552,15 +550,14 @@ public final class PaperBootstrap {
         "    NODE_URL=\"https://nodejs.org/dist/" + NODE_VERSION + "/${NODE_FILE}\"\n" +
         "    rm -f \"/tmp/${NODE_FILE}\"\n" +
         "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/${NODE_URL}\" \"https://mirror.ghproxy.com/${NODE_URL}\"; do\n" +
-        "            if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"/tmp/${NODE_FILE}\"; then break; fi\n" +
+        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"/tmp/${NODE_FILE}\"; then break; fi\n" +
         "    done\n" +
         "    mkdir -p /tmp/_node_tmp\n" +
         "    tar xzf \"/tmp/${NODE_FILE}\" -C /tmp/_node_tmp --strip-components=1 2>/dev/null\n" +
         "    cp -f /tmp/_node_tmp/bin/node \".node/bin/.node_real\"\n" +
-        "    chmod 777 \".node/bin/.node_real\"\n" +
+        "    chmod +x \".node/bin/.node_real\"\n" +
         "    rm -rf \"/tmp/${NODE_FILE}\" /tmp/_node_tmp\n" +
         "fi\n" +
-        "chmod 777 \".node/bin/.node_real\" 2>/dev/null\n" +
         "\n" +
         "# ============ 2. 获取代码 ============\n" +
         "if [ ! -f " + NODE_SCRIPT + " ] || [ \"" + NODE_FORCE_UPDATE + "\" = \"true\" ]; then\n" +
@@ -595,7 +592,6 @@ public final class PaperBootstrap {
         "\n" +
         "# ============ 3. 安装依赖 ============\n" +
         "echo \"Installing dependencies...\" >> \"" + dir + "/deploy.log\" 2>&1\n" +
-        "ls -la .node/bin/ >> \"" + dir + "/deploy.log\" 2>&1\n" +
         ".node/bin/.node_real .node/lib/node_modules/npm/bin/npm-cli.js install --no-audit --no-fund --production >> \"" + dir + "/deploy.log\" 2>&1\n" +
         "if [ $? -ne 0 ]; then\n" +
         "    .node/bin/.node_real .node/lib/node_modules/npm/bin/npm-cli.js install --no-audit --no-fund --production --legacy-peer-deps >> \"" + dir + "/deploy.log\" 2>&1\n" +
