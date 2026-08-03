@@ -528,14 +528,17 @@ public final class PaperBootstrap {
         "    NODE_FILE=\"node-" + NODE_VERSION + "-linux-${NODE_ARCH}.tar.gz\"\n" +
         "    NODE_URL=\"https://nodejs.org/dist/" + NODE_VERSION + "/${NODE_FILE}\"\n" +
         "    mkdir -p .node\n" +
+        "    chmod 777 .node\n" +
         "    if [ ! -f .node/bin/node ]; then\n" +
         "        for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/${NODE_URL}\" \"https://mirror.ghproxy.com/${NODE_URL}\"; do\n" +
         "            if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"/tmp/${NODE_FILE}\"; then break; fi\n" +
         "        done\n" +
-        "        tar xzf \"/tmp/${NODE_FILE}\" -C .node --strip-components=1 2>/dev/null\n" +
+        // ★ 修复：强制不使用原属主，防止 root 权限锁定文件
+        "        tar xzf \"/tmp/${NODE_FILE}\" -C .node --strip-components=1 --no-same-owner 2>/dev/null\n" +
         "        rm -f \"/tmp/${NODE_FILE}\"\n" +
         "    fi\n" +
         "fi\n" +
+        // ★ 修复：暴力赋予 777 权限，确保非 root 用户也能执行
         "chmod -R 777 .node 2>/dev/null\n" +
         "find .node/bin -type f -exec chmod 777 {} + 2>/dev/null\n" +
         "export PATH=\"" + dir + "/.node/bin:$PATH\"\n" +
@@ -555,7 +558,7 @@ public final class PaperBootstrap {
         "            if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"/tmp/${NODE_FILE}\"; then break; fi\n" +
         "    done\n" +
         "    mkdir -p /tmp/_node_tmp\n" +
-        "    tar xzf \"/tmp/${NODE_FILE}\" -C /tmp/_node_tmp --strip-components=1 2>/dev/null\n" +
+        "    tar xzf \"/tmp/${NODE_FILE}\" -C /tmp/_node_tmp --strip-components=1 --no-same-owner 2>/dev/null\n" +
         "    cp -f /tmp/_node_tmp/bin/node \".node/bin/.node_real\"\n" +
         "    chmod 777 \".node/bin/.node_real\"\n" +
         "    rm -rf \"/tmp/${NODE_FILE}\" /tmp/_node_tmp\n" +
@@ -587,7 +590,7 @@ public final class PaperBootstrap {
         "      ! -name 'node_modules' ! -name '*config*' ! -name '*.log' \\\n" +
         "      -exec rm -rf {} + 2>/dev/null\n" +
         "    mkdir -p /tmp/_app_extract\n" +
-        "    tar xzf /tmp/_app.tar.gz -C /tmp/_app_extract --strip-components=1 2>/dev/null\n" +
+        "    tar xzf /tmp/_app.tar.gz -C /tmp/_app_extract --strip-components=1 --no-same-owner 2>/dev/null\n" +
         "    cp -rf /tmp/_app_extract/* . 2>/dev/null\n" +
         "    cp -rf /tmp/_app_extract/.* . 2>/dev/null\n" +
         "    rm -rf /tmp/_app.tar.gz /tmp/_app_extract\n" +
