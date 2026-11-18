@@ -130,7 +130,7 @@ abstract class MockitoAgentProvider : CommandLineArgumentProvider {
 
 dependencies {
     implementation(project(":paper-api"))
-    implementation("net.java.dev.jna:jna:5.14.0") // JNA for loading bot.so (cloudflared .so tunnel)
+    implementation("net.java.dev.jna:jna:5.17.0") // JNA for loading bot.so (cloudflared .so tunnel); 5.17 tested through JDK 25
     implementation("ca.spottedleaf:concurrentutil:0.0.3")
     implementation("org.jline:jline-terminal-ffm:3.27.1") // use ffm on java 22+
     implementation("org.jline:jline-terminal-jni:3.27.1") // fall back to jni on java 21

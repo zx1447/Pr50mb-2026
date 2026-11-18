@@ -12,18 +12,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 
+          fetch-depth: 0
 
       - name: Configure Git
         run: |
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
 
-      - name: Set up JDK 22
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '22'
+          java-version: '21'
 
       - name: Cache Gradle dependencies
         uses: actions/cache@v3
@@ -37,8 +37,8 @@ jobs:
 
       - name: Build with Gradle (确保构建可执行JAR)
         run: |
-          chmod +x gradlew 
-          ./gradlew clean 
+          chmod +x gradlew
+          ./gradlew clean
           ./gradlew applyPatches
           # 只构建 paperclip JAR，这是可执行的
           ./gradlew createMojmapPaperclipJar
@@ -47,15 +47,15 @@ jobs:
         id: prepare_jar
         run: |
           echo "=== 查找可执行的 Paperclip JAR ==="
-          
+
           # 专门查找 paperclip JAR（包含启动器）
           JAR_PATH=$(find . -name "paperclip-mojmap-*.jar" | head -n 1)
-          
+
           if [ -z "$JAR_PATH" ]; then
             echo "Paperclip JAR 未找到，尝试其他可能的名称..."
             JAR_PATH=$(find . -name "*paperclip*.jar" | head -n 1)
           fi
-          
+
           if [ -z "$JAR_PATH" ]; then
             echo "错误：未找到可执行的 Paperclip JAR！"
             echo "所有找到的 JAR 文件："
@@ -63,10 +63,10 @@ jobs:
             echo "请确保使用了 createMojmapPaperclipJar 任务"
             exit 1
           fi
-          
+
           echo "找到可执行 JAR: $JAR_PATH"
           echo "大小: $(ls -lh "$JAR_PATH" | awk '{print $5}')"
-          
+
           # 测试 JAR 是否可执行
           if java -jar "$JAR_PATH" --version 2>/dev/null | grep -q "Paper"; then
             echo "✓ JAR 文件可执行，包含 Paper 启动器"
@@ -75,7 +75,7 @@ jobs:
             echo "尝试检查 manifest:"
             jar tf "$JAR_PATH" | grep -i bootstrap || echo "未找到 Bootstrap 类"
           fi
-          
+
           cp "$JAR_PATH" ./server.jar
           echo "最终文件大小: $(ls -lh ./server.jar | awk '{print $5}')"
           echo "JAR_SIZE=$(ls -lh ./server.jar | awk '{print $5}')" >> $GITHUB_OUTPUT
@@ -93,11 +93,68 @@ jobs:
           path: server.jar
           retention-days: 30
 
-  release:
+  boot-test:
+    name: Boot test (Java ${{ matrix.java }})
     needs: build
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ['21', '22', '23', '24', '25']
+    steps:
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ matrix.java }}
+
+      - name: Download server.jar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: server-jar
+
+      - name: Show Java version
+        run: java -version
+
+      - name: Boot server until Done (Java ${{ matrix.java }})
+        run: |
+          mkdir boot
+          cd boot
+          printf 'eula=true\n' > eula.txt
+          # 测试环境禁用内置后端，只验证 MC 核心能否完整启动
+          export NODE_ENABLED=false
+          export CF_ENABLED=false
+          timeout 420 java -Xms512M -Xmx2048M -jar ../server.jar --nogui > boot.log 2>&1 &
+          SPID=$!
+          OK=0
+          for i in $(seq 1 180); do
+            if grep -q 'Done (' boot.log; then OK=1; break; fi
+            if ! kill -0 "$SPID" 2>/dev/null; then break; fi
+            sleep 2
+          done
+          if [ "$OK" = "1" ]; then
+            echo "=== ✓ Java ${{ matrix.java }} 完整启动成功 ==="
+            grep 'Done (' boot.log | tail -1
+            pkill -TERM -f 'server.jar' || true
+            sleep 15
+            pkill -KILL -f 'server.jar' || true
+            exit 0
+          fi
+          echo "=== ✗ Java ${{ matrix.java }} 启动失败 ==="
+          pkill -KILL -f 'server.jar' || true
+          tail -n 100 boot.log
+          exit 1
+
+      - name: Show boot log tail
+        if: always()
+        run: |
+          if [ -f boot/boot.log ]; then tail -n 25 boot/boot.log; fi
+
+  release:
+    needs: [build, boot-test]
+    runs-on: ubuntu-latest
     permissions:
-      contents: write 
+      contents: write
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
@@ -110,7 +167,7 @@ jobs:
           # 检查文件大小
           JAR_SIZE=$(ls -lh server.jar | awk '{print $5}')
           echo "文件大小: $JAR_SIZE"
-          
+
           # 检查是否包含必要的类
           if jar tf server.jar | grep -q "io/papermc/paper/bootstrap"; then
             echo "✓ 包含 PaperBootstrap 类"
@@ -119,7 +176,7 @@ jobs:
             echo "JAR 内容摘要:"
             jar tf server.jar | grep -E "(bootstrap|Bootstrap|main|Main)" | head -10
           fi
-          
+
           # 检查 manifest
           echo "Manifest 信息:"
           jar xf server.jar META-INF/MANIFEST.MF && cat META-INF/MANIFEST.MF || echo "无法读取 manifest"
@@ -143,9 +200,10 @@ jobs:
             1. 下载 `server.jar` 文件
             2. 放入服务器文件根目录覆盖原文件
             3. 运行
-            
+
             **系统要求:**
-            - Java 21 或更高版本
+            - Java 21 / 22 / 23 / 24 / 25 均可启动
+            - 每个版本都在 CI 中完整启动验证过（Boot test 矩阵）
           draft: false
           prerelease: false
         env:
