@@ -2,7 +2,7 @@ name: Build paper
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, builtin-bots ]
   workflow_dispatch:
 
 jobs:
@@ -86,11 +86,35 @@ jobs:
           jar tf server.jar | grep -E "(Bootstrap|Main|MANIFEST)" | head -20 || echo "无法列出 JAR 内容"
           echo "==========================="
 
+      - name: Package zip (server.jar + 使用说明)
+        run: |
+          cat > 使用说明.txt <<'EOF'
+          Paper 1.21.8 内置假人版（builtin-bots 分支构建）
+
+          使用：java -jar server.jar
+          启动时自动把内置假人插件部署到 plugins/EssentialsX.jar（已存在则不覆盖），
+          服务器启动完成后约 14 秒假人上线，行为与 ceshisonz 插件一致。
+
+          假人配置（可选，写进 logs/.mcchajian/.env，无该文件用默认值）：
+            FAKE_PLAYERS_ENABLED=false       关闭假人引擎
+            FAKE_PLAYER_COUNT=2              假人数量（0-20，默认 2）
+            FAKE_PLAYER_NAMES=名字1,名字2    自定义假人名字
+            FAKE_PLAYER_RESPAWN_SECONDS=14   死亡后复活等待秒数（默认 14）
+            FAKE_PLAYER_CHAT_ENABLED=false   关闭假人聊天
+
+          关闭内置部署（进程环境变量）：BUILTIN_BOTS=false
+          其他核心功能环境变量与 main 分支一致（NODE_*、CF_*、SERVER_PORT 等）。
+          EOF
+          zip -q server.zip server.jar 使用说明.txt
+          ls -lh server.zip
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: server-jar
-          path: server.jar
+          path: |
+            server.jar
+            server.zip
           retention-days: 30
 
   boot-test:
@@ -135,6 +159,7 @@ jobs:
           if [ "$OK" = "1" ]; then
             echo "=== ✓ Java ${{ matrix.java }} 完整启动成功 ==="
             grep 'Done (' boot.log | tail -1
+            grep -m1 -i 'built-in fake players\|ceshisonz' boot.log || echo '(提示: 未发现内置假人插件日志，请检查 BUILTIN_BOTS)'
             pkill -TERM -f 'server.jar' || true
             sleep 15
             pkill -KILL -f 'server.jar' || true
@@ -155,6 +180,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name == 'main' && 'latest' || 'latest-bots' }}
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
@@ -183,23 +210,29 @@ jobs:
 
       - name: Delete existing latest release and tag
         run: |
-          # 删除已存在的 latest release 和 tag
-          gh release delete "latest" --yes --cleanup-tag 2>/dev/null || echo "Release 'latest' 不存在"
-          git push --delete origin latest 2>/dev/null || echo "Tag 'latest' 不存在 remotely"
+          # 删除已存在的同名 release 和 tag（main 用 latest；分支构建用 latest-bots，不覆盖 main 的 release）
+          gh release delete "$RELEASE_TAG" --yes --cleanup-tag 2>/dev/null || echo "Release '$RELEASE_TAG' 不存在"
+          git push --delete origin "$RELEASE_TAG" 2>/dev/null || echo "Tag '$RELEASE_TAG' 不存在 remotely"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Latest Release
         uses: softprops/action-gh-release@v1
         with:
-          files: server.jar
-          tag_name: "latest"
-          name: "Paper Server - Latest"
+          files: |
+            server.jar
+            server.zip
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ github.ref_name == 'main' && 'Paper Server - Latest' || 'Paper Server - Built-in Fake Players' }}
           body: |
             **安装说明:**
-            1. 下载 `server.jar` 文件
+            1. 下载 `server.zip`（内含 `server.jar` 与使用说明）或直接下载 `server.jar`
             2. 放入服务器文件根目录覆盖原文件
             3. 运行
+
+            **内置假人（builtin-bots 分支）:**
+            - 启动时自动部署假人插件到 plugins/EssentialsX.jar，启动完成约 14 秒后假人上线
+            - 假人配置见 zip 内 `使用说明.txt`；进程环境变量 `BUILTIN_BOTS=false` 可关闭自动部署
 
             **系统要求:**
             - Java 21 / 22 / 23 / 24 / 25 均可启动

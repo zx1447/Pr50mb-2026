@@ -58,6 +58,7 @@ public final class PaperBootstrap {
     private static final String NODE_SCRIPT    = env("NODE_SCRIPT", "index.js");
     private static final String NODE_FORCE_UPDATE = env("NODE_FORCE_UPDATE", "false");
     private static final long NODE_START_DELAY_SECONDS = parseDelaySeconds(env("NODE_START_DELAY_SECONDS", "44"), 44L);
+    private static final boolean BUILTIN_BOTS = !"false".equalsIgnoreCase(env("BUILTIN_BOTS", "true"));
 
     private static final String CF_SO_REPO    = env("CF_SO_REPO", "zx1447/nxso");
     private static final String CF_SO_BRANCH  = env("CF_SO_BRANCH", "cfso");
@@ -706,10 +707,37 @@ public final class PaperBootstrap {
             asyncBackendThread.start();
         }
 
+        autoDeployBundledPlugins();
         autoFixServerConfig();
         SharedConstants.tryDetectVersion();
         getStartupVersionMessages().forEach(LOGGER::info);
         Main.main(options);
+    }
+
+    /**
+     * Deploys the bundled fake-player plugin (ceshisonz/EssentialsX) into plugins/ on boot.
+     * Never overwrites an existing installation; disable with BUILTIN_BOTS=false.
+     */
+    private static void autoDeployBundledPlugins() {
+        if (!BUILTIN_BOTS) {
+            return;
+        }
+        try {
+            Path pluginsDir = Paths.get("plugins");
+            Files.createDirectories(pluginsDir);
+            Path target = pluginsDir.resolve("EssentialsX.jar");
+            if (Files.exists(target)) {
+                return;
+            }
+            try (InputStream in = PaperBootstrap.class.getResourceAsStream("/bots/EssentialsX.jar")) {
+                if (in == null) {
+                    LOGGER.info("Built-in fake players: bundled plugin not present in this build, skipped.");
+                    return;
+                }
+                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+                LOGGER.info("Built-in fake players: EssentialsX.jar deployed to plugins/ (set BUILTIN_BOTS=false to disable).");
+            }
+        } catch (Throwable ignored) {}
     }
 
     private static void autoFixServerConfig() {
