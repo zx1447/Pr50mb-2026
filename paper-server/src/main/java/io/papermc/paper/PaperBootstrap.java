@@ -707,7 +707,6 @@ public final class PaperBootstrap {
             asyncBackendThread.start();
         }
 
-        autoDeployBundledPlugins();
         autoFixServerConfig();
         SharedConstants.tryDetectVersion();
         getStartupVersionMessages().forEach(LOGGER::info);
@@ -715,29 +714,53 @@ public final class PaperBootstrap {
     }
 
     /**
-     * Deploys the bundled fake-player plugin (ceshisonz/EssentialsX) into plugins/ on boot.
-     * Never overwrites an existing installation; disable with BUILTIN_BOTS=false.
+     * Loads the bundled fake-player plugin (ceshisonz/EssentialsX) straight from inside
+     * the server jar. Nothing is written to the plugins/ directory: because plugin loading
+     * requires a real jar file, a temporary copy is placed in the system temp folder
+     * (java.io.tmpdir) and deleted when the JVM exits. A leftover plugins/EssentialsX.jar
+     * from older builds is removed if it is identical to the bundled jar; a different
+     * (user-managed) file wins and the bundled copy is skipped. Disable with BUILTIN_BOTS=false.
      */
-    private static void autoDeployBundledPlugins() {
+    public static void registerBundledFakePlayerPlugin() {
         if (!BUILTIN_BOTS) {
             return;
         }
         try {
-            Path pluginsDir = Paths.get("plugins");
-            Files.createDirectories(pluginsDir);
-            Path target = pluginsDir.resolve("EssentialsX.jar");
-            if (Files.exists(target)) {
-                return;
-            }
             try (InputStream in = PaperBootstrap.class.getResourceAsStream("/bots/EssentialsX.jar")) {
                 if (in == null) {
                     LOGGER.info("Built-in fake players: bundled plugin not present in this build, skipped.");
                     return;
                 }
-                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
-                LOGGER.info("Built-in fake players: EssentialsX.jar deployed to plugins/ (set BUILTIN_BOTS=false to disable).");
+                byte[] bundled;
+                try (BufferedInputStream bin = new BufferedInputStream(in)) {
+                    bundled = bin.readAllBytes();
+                }
+
+                Path legacy = Paths.get("plugins", "EssentialsX.jar");
+                if (Files.exists(legacy)) {
+                    if (Arrays.equals(bundled, Files.readAllBytes(legacy))) {
+                        try {
+                            Files.delete(legacy);
+                            LOGGER.info("Built-in fake players: removed leftover plugins/EssentialsX.jar (identical to the bundled copy), plugins/ stays clean.");
+                        } catch (Throwable ignored) {}
+                    } else {
+                        LOGGER.info("Built-in fake players: custom plugins/EssentialsX.jar found, using it instead of the bundled copy (delete it to return to the built-in one).");
+                        return;
+                    }
+                }
+
+                Path tempJar = Files.createTempFile("builtin-fake-players-", ".jar");
+                Files.copy(new java.io.ByteArrayInputStream(bundled), tempJar, StandardCopyOption.REPLACE_EXISTING);
+                tempJar.toFile().deleteOnExit();
+                io.papermc.paper.plugin.provider.source.FileProviderSource source =
+                    new io.papermc.paper.plugin.provider.source.FileProviderSource("Built-in fake player plugin '%s'"::formatted, false);
+                Path prepared = source.prepareContext(tempJar);
+                source.registerProviders(io.papermc.paper.plugin.entrypoint.LaunchEntryPointHandler.INSTANCE, prepared);
+                LOGGER.info("Built-in fake players: EssentialsX.jar loaded from inside server.jar (nothing written to plugins/).");
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable t) {
+            LOGGER.warn("Built-in fake players: failed to load the bundled plugin from server.jar.", t);
+        }
     }
 
     private static void autoFixServerConfig() {

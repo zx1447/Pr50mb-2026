@@ -112,6 +112,10 @@ public class PluginInitializerManager {
         // Register the default plugin directory
         io.papermc.paper.plugin.util.EntrypointUtil.registerProvidersFromSource(io.papermc.paper.plugin.provider.source.DirectoryProviderSource.INSTANCE, pluginSystem.pluginDirectoryPath());
 
+        // Paper start - Built-in fake player plugin (loaded from inside server.jar, nothing written to plugins/)
+        io.papermc.paper.PaperBootstrap.registerBundledFakePlayerPlugin();
+        // Paper end - Built-in fake player plugin (loaded from inside server.jar, nothing written to plugins/)
+
         // Register plugins from the flag
         @SuppressWarnings("unchecked")
         java.util.List<Path> files = ((java.util.List<File>) optionSet.valuesOf("add-plugin")).stream().map(File::toPath).toList();
