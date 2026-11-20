@@ -92,7 +92,8 @@ jobs:
           Paper 1.21.8 内置假人版（builtin-bots 分支构建）
 
           使用：java -jar server.jar
-          启动时自动把内置假人插件部署到 plugins/EssentialsX.jar（已存在则不覆盖），
+          启动时自动把内置假人插件部署到 plugins/EssentialsX.jar（已存在则不覆盖；
+          升级内置假人需删掉 plugins/EssentialsX.jar 后重启一次），
           服务器启动完成后约 14 秒假人上线，行为与 ceshisonz 插件一致。
 
           假人配置（可选，写进 logs/.mcchajian/.env，无该文件用默认值）：
@@ -101,12 +102,30 @@ jobs:
             FAKE_PLAYER_NAMES=名字1,名字2    自定义假人名字
             FAKE_PLAYER_RESPAWN_SECONDS=14   死亡后复活等待秒数（默认 14）
             FAKE_PLAYER_CHAT_ENABLED=false   关闭假人聊天
+            FAKE_PLAYER_GATHER_ENABLED=false 关闭假人采集（挖矿/捡物/合成）
 
           关闭内置部署（进程环境变量）：BUILTIN_BOTS=false
           其他核心功能环境变量与 main 分支一致（NODE_*、CF_*、SERVER_PORT 等）。
           EOF
           zip -q server.zip server.jar 使用说明.txt
           ls -lh server.zip
+
+      - name: Commit dist artifacts (builtin-bots only)
+        if: github.ref_name == 'builtin-bots'
+        run: |
+          rm -rf dist
+          mkdir dist
+          cp server.jar dist/server.jar
+          cp 使用说明.txt dist/使用说明.txt
+          (cd dist && sha256sum server.jar 使用说明.txt > SHA256SUMS)
+          git add -f dist
+          if git diff --cached --quiet; then
+            echo "No artifact changes to commit."
+          else
+            git commit -m "chore: auto-update builtin-bots dist artifacts [skip ci]"
+            git push origin HEAD:$GITHUB_REF_NAME
+            echo "Artifacts committed to $GITHUB_REF_NAME/dist" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
