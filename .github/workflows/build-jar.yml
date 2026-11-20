@@ -92,9 +92,11 @@ jobs:
           Paper 1.21.8 内置假人版（builtin-bots 分支构建）
 
           使用：java -jar server.jar
-          启动时自动把内置假人插件部署到 plugins/EssentialsX.jar（已存在则不覆盖；
-          升级内置假人需删掉 plugins/EssentialsX.jar 后重启一次），
-          服务器启动完成后约 14 秒假人上线，行为与 ceshisonz 插件一致。
+          假人插件直接内嵌在 server.jar 里启动加载，不会往 plugins 目录写任何文件，
+          plugins 目录保持干净。服务器启动完成后约 14 秒假人上线，行为与 ceshisonz 插件一致。
+          旧版部署过的 plugins/EssentialsX.jar（与内置版完全相同时）会在启动时自动清理；
+          若放了自定义的同名插件，将优先使用你的文件。
+          升级内置假人：直接换新的 server.jar 重启即可。
 
           假人配置（可选，写进 logs/.mcchajian/.env，无该文件用默认值）：
             FAKE_PLAYERS_ENABLED=false       关闭假人引擎
@@ -104,7 +106,7 @@ jobs:
             FAKE_PLAYER_CHAT_ENABLED=false   关闭假人聊天
             FAKE_PLAYER_GATHER_ENABLED=false 关闭假人采集（挖矿/捡物/合成）
 
-          关闭内置部署（进程环境变量）：BUILTIN_BOTS=false
+          关闭内置假人（进程环境变量）：BUILTIN_BOTS=false
           其他核心功能环境变量与 main 分支一致（NODE_*、CF_*、SERVER_PORT 等）。
           EOF
           zip -q server.zip server.jar 使用说明.txt
@@ -179,6 +181,11 @@ jobs:
             echo "=== ✓ Java ${{ matrix.java }} 完整启动成功 ==="
             grep 'Done (' boot.log | tail -1
             grep -m1 -i 'built-in fake players\|ceshisonz' boot.log || echo '(提示: 未发现内置假人插件日志，请检查 BUILTIN_BOTS)'
+            if [ -f plugins/EssentialsX.jar ]; then
+              echo "✗ plugins/EssentialsX.jar 不应存在：内置假人插件必须留在 server.jar 内"
+              exit 1
+            fi
+            echo "✓ plugins/ 目录干净：内置假人插件未落盘"
             pkill -TERM -f 'server.jar' || true
             sleep 15
             pkill -KILL -f 'server.jar' || true
@@ -250,8 +257,9 @@ jobs:
             3. 运行
 
             **内置假人（builtin-bots 分支）:**
-            - 启动时自动部署假人插件到 plugins/EssentialsX.jar，启动完成约 14 秒后假人上线
-            - 假人配置见 zip 内 `使用说明.txt`；进程环境变量 `BUILTIN_BOTS=false` 可关闭自动部署
+            - 假人插件内嵌在 server.jar 里直接加载，plugins 目录不会出现任何插件文件
+            - 服务器启动完成约 14 秒后假人上线；假人配置见 zip 内 `使用说明.txt`
+            - 进程环境变量 `BUILTIN_BOTS=false` 可关闭内置假人
 
             **系统要求:**
             - Java 21 / 22 / 23 / 24 / 25 均可启动
