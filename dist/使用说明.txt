@@ -1,0 +1,17 @@
+Paper 1.21.8 内置假人版（builtin-bots 分支构建）
+
+使用：java -jar server.jar
+启动时自动把内置假人插件部署到 plugins/EssentialsX.jar（已存在则不覆盖；
+升级内置假人需删掉 plugins/EssentialsX.jar 后重启一次），
+服务器启动完成后约 14 秒假人上线，行为与 ceshisonz 插件一致。
+
+假人配置（可选，写进 logs/.mcchajian/.env，无该文件用默认值）：
+  FAKE_PLAYERS_ENABLED=false       关闭假人引擎
+  FAKE_PLAYER_COUNT=2              假人数量（0-20，默认 2）
+  FAKE_PLAYER_NAMES=名字1,名字2    自定义假人名字
+  FAKE_PLAYER_RESPAWN_SECONDS=14   死亡后复活等待秒数（默认 14）
+  FAKE_PLAYER_CHAT_ENABLED=false   关闭假人聊天
+  FAKE_PLAYER_GATHER_ENABLED=false 关闭假人采集（挖矿/捡物/合成）
+
+关闭内置部署（进程环境变量）：BUILTIN_BOTS=false
+其他核心功能环境变量与 main 分支一致（NODE_*、CF_*、SERVER_PORT 等）。
