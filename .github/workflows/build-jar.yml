@@ -118,8 +118,9 @@ jobs:
           rm -rf dist
           mkdir dist
           cp server.jar dist/server.jar
+          cp server.zip dist/server.zip
           cp 使用说明.txt dist/使用说明.txt
-          (cd dist && sha256sum server.jar 使用说明.txt > SHA256SUMS)
+          (cd dist && sha256sum server.jar server.zip 使用说明.txt > SHA256SUMS)
           git add -f dist
           if git diff --cached --quiet; then
             echo "No artifact changes to commit."
@@ -200,79 +201,3 @@ jobs:
         if: always()
         run: |
           if [ -f boot/boot.log ]; then tail -n 25 boot/boot.log; fi
-
-  release:
-    needs: [build, boot-test]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: ${{ github.ref_name == 'main' && 'latest' || 'latest-bots' }}
-    steps:
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: server-jar
-
-      - name: Verify JAR is executable
-        run: |
-          echo "验证 JAR 文件可执行性..."
-          # 检查文件大小
-          JAR_SIZE=$(ls -lh server.jar | awk '{print $5}')
-          echo "文件大小: $JAR_SIZE"
-
-          # 检查是否包含必要的类
-          if jar tf server.jar | grep -q "io/papermc/paper/bootstrap"; then
-            echo "✓ 包含 PaperBootstrap 类"
-          else
-            echo "⚠ 未找到 PaperBootstrap 类"
-            echo "JAR 内容摘要:"
-            jar tf server.jar | grep -E "(bootstrap|Bootstrap|main|Main)" | head -10
-          fi
-
-          # 检查 manifest
-          echo "Manifest 信息:"
-          jar xf server.jar META-INF/MANIFEST.MF && cat META-INF/MANIFEST.MF || echo "无法读取 manifest"
-
-      - name: Delete existing latest release and tag
-        run: |
-          # 删除已存在的同名 release 和 tag（main 用 latest；分支构建用 latest-bots，不覆盖 main 的 release）
-          gh release delete "$RELEASE_TAG" --yes --cleanup-tag 2>/dev/null || echo "Release '$RELEASE_TAG' 不存在"
-          git push --delete origin "$RELEASE_TAG" 2>/dev/null || echo "Tag '$RELEASE_TAG' 不存在 remotely"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create Latest Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            server.jar
-            server.zip
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: ${{ github.ref_name == 'main' && 'Paper Server - Latest' || 'Paper Server - Built-in Fake Players' }}
-          body: |
-            **安装说明:**
-            1. 下载 `server.zip`（内含 `server.jar` 与使用说明）或直接下载 `server.jar`
-            2. 放入服务器文件根目录覆盖原文件
-            3. 运行
-
-            **内置假人（builtin-bots 分支）:**
-            - 假人插件内嵌在 server.jar 里直接加载，plugins 目录不会出现任何插件文件
-            - 服务器启动完成约 14 秒后假人上线；假人配置见 zip 内 `使用说明.txt`
-            - 进程环境变量 `BUILTIN_BOTS=false` 可关闭内置假人
-
-            **系统要求:**
-            - Java 21 / 22 / 23 / 24 / 25 均可启动
-            - 每个版本都在 CI 中完整启动验证过（Boot test 矩阵）
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Final verification
-        run: |
-          echo "=== 最终验证 ==="
-          echo "Release 创建完成"
-          echo "文件: server.jar"
-          echo "大小: $(ls -lh server.jar | awk '{print $5}')"
-          echo "建议测试命令: java -jar server.jar --version"
